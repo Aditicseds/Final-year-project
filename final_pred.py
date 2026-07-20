@@ -812,7 +812,6 @@
 #
 # # Importing Libraries
 import threading
-import time
 import numpy as np
 import math
 import cv2
@@ -822,11 +821,8 @@ import pyttsx3
 from keras.models import load_model
 from cvzone.HandTrackingModule import HandDetector
 from string import ascii_uppercase
-
 try:
     import enchant
-
-    # Try different dictionary formats
     try:
         ddd = enchant.Dict("en_US")
     except:
@@ -842,251 +838,153 @@ try:
 except ImportError:
     print("Warning: enchant module not installed. Install with: pip install pyenchant")
     ddd = None
-
 import tkinter as tk
 from PIL import Image, ImageTk
-
-# Configuration constants
 OFFSET = 29
 STABILITY_FRAMES = 5  # Number of consecutive frames needed to confirm a letter (reduced for responsiveness)
 WHITE_IMAGE_PATH = "white.jpg"  # Update this path if needed
 MODEL_PATH = 'cnn8grps_rad1_model.h5'
-PREDICTION_INTERVAL = 2  # Process prediction every N frames for performance (reduced for better responsiveness)
-
-# Initialize global components
+PREDICTION_INTERVAL = 2
 hd = HandDetector(maxHands=1)
 hd2 = HandDetector(maxHands=1)
-
 os.environ["THEANO_FLAGS"] = "device=cuda, assert_no_cpu_op=True"
-
-
-# Application Class
 class Application:
-
     def __init__(self):
-        # Initialize video capture and model
         self.vs = cv2.VideoCapture(0)
         self.current_image = None
         self.model = load_model(MODEL_PATH)
         print("Loaded model from disk")
-
-        # Initialize text-to-speech engine
         self.speak_engine = pyttsx3.init()
         self.speak_engine.setProperty("rate", 100)
         voices = self.speak_engine.getProperty("voices")
         if voices:
             self.speak_engine.setProperty("voice", voices[0].id)
-
-        # Letter stability tracking
         self.current_letter = None
         self.stable_letter = None
         self.stable_count = 0
         self.last_confirmed_letter = None  # Track last confirmed letter to detect changes
         self.frames_since_confirmation = 0  # Cooldown period after confirmation
-
-        # Word and sentence formation
         self.current_word = ""
         self.sentence = ""
-
-        # Space handling (palm detection)
         self.palm_detected = False
         self.space_added = False  # Track if space was already added for current palm gesture
-
-        # Performance optimization: cache white image
         self.white_image = self.load_white_image()
-
-        # Frame counter for prediction throttling
         self.frame_count = 0
-
-        # Previous state tracking
         self.prev_char = ""
         self.count = -1
         self.ten_prev_char = [" "] * 10
-
-        # Character counter (legacy, kept for compatibility)
         self.ct = {'blank': 0}
         for i in ascii_uppercase:
             self.ct[i] = 0
-
-        # Initialize GUI
         self.root = tk.Tk()
         self.root.title("Sign Language To Text Conversion")
         self.root.protocol('WM_DELETE_WINDOW', self.destructor)
         self.root.geometry("1300x750")
-
-        # Title
         self.T = tk.Label(self.root, text="Sign Language To Text Conversion", font=("Courier", 24, "bold"))
         self.T.place(x=240, y=10)
-
-        # Camera output
         self.panel = tk.Label(self.root, bg="gray")
         self.panel.place(x=60, y=60, width=500, height=350)
-
-        # Processed hand sign output
         self.panel2 = tk.Label(self.root, bg="lightgray")
         self.panel2.place(x=700, y=60, width=400, height=350)
-
-        # Current Character
         self.T1 = tk.Label(self.root, text="Character :", font=("Courier", 22, "bold"))
         self.T1.place(x=60, y=430)
-
         self.panel3 = tk.Label(self.root, text="", font=("Courier", 30))
         self.panel3.place(x=250, y=430)
-
-        # Current Word label
         self.T2 = tk.Label(self.root, text="Current Word :", font=("Courier", 22, "bold"))
         self.T2.place(x=60, y=470)
-
         self.panel4 = tk.Label(self.root, text="", font=("Courier", 20), bg="lightyellow", width=30, anchor="w")
         self.panel4.place(x=250, y=470)
-
-        # Sentence area
         self.T3 = tk.Label(self.root, text="Sentence :", font=("Courier", 22, "bold"))
         self.T3.place(x=60, y=510)
-
         self.panel5 = tk.Text(self.root, font=("Courier", 18), wrap="word", height=2, width=45)
         self.panel5.place(x=260, y=510)
-
-        # Suggestions
         self.T4 = tk.Label(self.root, text="Suggestions :", fg="red", font=("Courier", 22, "bold"))
         self.T4.place(x=60, y=540)
-
-        # Suggestion buttons
         btn_y = 580
         self.b1 = tk.Button(self.root, text="", font=("Courier", 16), width=10, command=self.action1)
         self.b1.place(x=120, y=btn_y)
-
         self.b2 = tk.Button(self.root, text="", font=("Courier", 16), width=10, command=self.action2)
         self.b2.place(x=350, y=btn_y)
-
         self.b3 = tk.Button(self.root, text="", font=("Courier", 16), width=10, command=self.action3)
         self.b3.place(x=580, y=btn_y)
-
         self.b4 = tk.Button(self.root, text="", font=("Courier", 16), width=10, command=self.action4)
         self.b4.place(x=810, y=btn_y)
-
-        # Speak + Clear buttons (bottom right)
         self.speak = tk.Button(self.root, text="Speak", font=("Courier", 18), width=8, command=self.speak_fun)
         self.speak.place(x=1100, y=480)
-
         self.clear = tk.Button(self.root, text="Clear", font=("Courier", 18), width=8, bg="red", fg="white",
                                command=self.clear_fun)
         self.clear.place(x=1100, y=580)
-
-        # Suggestion words
         self.word1 = " "
         self.word2 = " "
         self.word3 = " "
         self.word4 = " "
         self.word = " "  # Current word being typed (for suggestions)
-
-        # Start video loop
         self.video_loop()
-
     def load_white_image(self):
-        """Load and cache the white background image for hand drawing."""
-        # Try multiple possible paths
         possible_paths = [
             WHITE_IMAGE_PATH,
             os.path.join(os.path.dirname(__file__), WHITE_IMAGE_PATH),
             "white.jpg"
         ]
-
         for path in possible_paths:
             if os.path.exists(path):
                 img = cv2.imread(path)
                 if img is not None:
                     return img.copy()
-
-        # If not found, create a white image
         print(f"Warning: {WHITE_IMAGE_PATH} not found. Creating blank white image.")
         return np.ones((400, 400, 3), dtype=np.uint8) * 255
-
     def video_loop(self):
-        """Main video processing loop with stability and word formation logic."""
         try:
             ok, frame = self.vs.read()
             if not ok:
                 return
-
             cv2image = cv2.flip(frame, 1)
             cv2image_copy = np.array(cv2image)
             cv2image_rgb = cv2.cvtColor(cv2image, cv2.COLOR_BGR2RGB)
-
-            # Update camera display
             self.current_image = Image.fromarray(cv2image_rgb)
             imgtk = ImageTk.PhotoImage(image=self.current_image)
             self.panel.imgtk = imgtk
             self.panel.config(image=imgtk)
-
-            # Detect hands
             hands = hd.findHands(cv2image, draw=False, flipType=True)
-
-            # Check for palm (space) gesture
             current_palm_detected = self.detect_palm(hands)
             self.handle_space_logic(current_palm_detected)
-
             if hands and len(hands) > 0 and hands[0]:
                 hand = hands[0]
                 hand_data = hand[0]
                 x, y, w, h = hand_data['bbox']
-
-                # Extract hand region
                 image = cv2image_copy[max(0, y - OFFSET):y + h + OFFSET,
                         max(0, x - OFFSET):x + w + OFFSET]
-
                 if image.size > 0:
                     handz = hd2.findHands(image, draw=False, flipType=True)
                     self.frame_count += 1
-
                     if handz and len(handz) > 0 and handz[0]:
                         hand_detailed = handz[0]
                         handmap = hand_detailed[0]
                         self.pts = handmap['lmList']
-
-                        # Draw hand skeleton on white background
                         white = self.white_image.copy()  # Use cached image
-
                         os_offset = ((400 - w) // 2) - 15
                         os1_offset = ((400 - h) // 2) - 15
-
-                        # Draw hand skeleton
                         self.draw_hand_skeleton(white, os_offset, os1_offset)
-
-                        # Predict letter (throttled for performance)
                         if self.frame_count % PREDICTION_INTERVAL == 0:
                             detected_letter = self.predict_letter(white.copy())
                             self.frames_since_confirmation += 1
-
-                            # Skip if no letter detected
                             if detected_letter is None:
                                 self.current_letter = None
                                 self.stable_count = 0
                             else:
-                                # Update stability logic
                                 if detected_letter == self.current_letter:
                                     self.stable_count += 1
                                 else:
-                                    # Letter changed - reset tracking
                                     self.current_letter = detected_letter
                                     self.stable_count = 1
-                                    # If new letter is different from last confirmed, reset stable_letter
-                                    # This allows the same letter to be added again after changing gestures
                                     if detected_letter != self.last_confirmed_letter:
                                         self.stable_letter = None
-                                    # If it's the same letter, keep stable_letter to prevent immediate re-addition
-
-                                # Confirm letter after stability threshold
-                                # Allow confirmation if:
-                                # 1. Letter is different from last confirmed, OR
-                                # 2. Enough frames passed since last confirmation (cooldown)
                                 if self.stable_count >= STABILITY_FRAMES and detected_letter:
                                     can_confirm = False
                                     if detected_letter != self.stable_letter:
                                         can_confirm = True
                                     elif self.frames_since_confirmation > STABILITY_FRAMES * 2:  # Cooldown period
                                         can_confirm = True
-
                                     if can_confirm:
                                         self.confirm_letter(detected_letter)
                                         self.stable_letter = detected_letter
@@ -1095,24 +993,16 @@ class Application:
                                         self.stable_count = 0
                                         self.current_letter = None
                                         self.frames_since_confirmation = 0
-
-                        # Update processed hand display
                         self.current_image2 = Image.fromarray(white)
                         imgtk2 = ImageTk.PhotoImage(image=self.current_image2)
                         self.panel2.imgtk = imgtk2
                         self.panel2.config(image=imgtk2)
-
-            # Update GUI displays
             self.update_gui()
-
         except Exception as e:
             print("Error in video_loop:", traceback.format_exc())
         finally:
             self.root.after(1, self.video_loop)
-
     def draw_hand_skeleton(self, white, os, os1):
-        """Draw hand skeleton on white background."""
-        # Draw finger connections
         for t in range(0, 4, 1):
             cv2.line(white, (self.pts[t][0] + os, self.pts[t][1] + os1),
                      (self.pts[t + 1][0] + os, self.pts[t + 1][1] + os1), (0, 255, 0), 3)
@@ -1128,8 +1018,6 @@ class Application:
         for t in range(17, 20, 1):
             cv2.line(white, (self.pts[t][0] + os, self.pts[t][1] + os1),
                      (self.pts[t + 1][0] + os, self.pts[t + 1][1] + os1), (0, 255, 0), 3)
-
-        # Draw palm connections
         cv2.line(white, (self.pts[5][0] + os, self.pts[5][1] + os1),
                  (self.pts[9][0] + os, self.pts[9][1] + os1), (0, 255, 0), 3)
         cv2.line(white, (self.pts[9][0] + os, self.pts[9][1] + os1),
@@ -1140,67 +1028,47 @@ class Application:
                  (self.pts[5][0] + os, self.pts[5][1] + os1), (0, 255, 0), 3)
         cv2.line(white, (self.pts[0][0] + os, self.pts[0][1] + os1),
                  (self.pts[17][0] + os, self.pts[17][1] + os1), (0, 255, 0), 3)
-
-        # Draw joint points
         for i in range(21):
             cv2.circle(white, (self.pts[i][0] + os, self.pts[i][1] + os1), 2, (0, 0, 255), 1)
 
     def detect_palm(self, hands):
-        """Detect if palm is open (all fingers extended) - used for space gesture."""
         if not hands or len(hands) == 0 or not hands[0]:
             return False
-
         try:
             hand = hands[0][0]
             if 'lmList' not in hand:
                 return False
-
             pts = hand['lmList']
-
-            # Check if all fingers are extended (palm open gesture)
-            # All fingertips should be above their respective PIP joints
             fingers_up = (
                     pts[8][1] < pts[6][1] and  # Index finger
                     pts[12][1] < pts[10][1] and  # Middle finger
                     pts[16][1] < pts[14][1] and  # Ring finger
                     pts[20][1] < pts[18][1]  # Pinky finger
             )
-
             return fingers_up
         except:
             return False
-
     def handle_space_logic(self, palm_detected):
-        """Handle space logic: add space only once per palm gesture."""
         if palm_detected and not self.space_added:
-            # Add space and complete current word
             if self.current_word.strip():
                 self.sentence += self.current_word + " "
-                # Speak the completed word
                 threading.Thread(target=self._speak_word, args=(self.current_word.strip(),)).start()
                 self.current_word = ""
             else:
-                # Just add space if no word was being formed
                 if self.sentence and not self.sentence.endswith(" "):
                     self.sentence += " "
             self.space_added = True
         elif not palm_detected:
-            # Reset flag when palm is no longer detected
             self.space_added = False
 
     def confirm_letter(self, letter):
-        """Confirm a stable letter and add it to current word."""
-        # Skip spaces, backspace, and special commands
         if letter in [" ", "next", "Backspace", None]:
             return
-
-        # Handle backspace
         if letter == "Backspace":
             if self.current_word:
                 self.current_word = self.current_word[:-1]
             elif self.sentence:
                 self.sentence = self.sentence.rstrip()
-                # Remove last word if sentence doesn't end with space
                 if self.sentence and not self.sentence.endswith(" "):
                     words = self.sentence.rsplit(" ", 1)
                     if len(words) > 1:
@@ -1209,8 +1077,6 @@ class Application:
                     else:
                         self.sentence = ""
             return
-
-        # Add letter to current word (only uppercase letters)
         if letter and len(letter) == 1 and letter.isalpha():
             self.current_word += letter
             print(f"Added letter '{letter}' to word. Current word: '{self.current_word}'")  # Debug output
@@ -1218,55 +1084,36 @@ class Application:
             self.update_suggestions()
 
     def update_gui(self):
-        """Update all GUI elements."""
-        # Show detected letter (not yet confirmed)
         display_letter = self.current_letter if self.current_letter else "None"
         if self.current_letter and self.stable_count < STABILITY_FRAMES:
             display_letter += f" ({self.stable_count}/{STABILITY_FRAMES})"
         self.panel3.config(text=display_letter)
-
-        # Show current word
         self.panel4.config(text=self.current_word if self.current_word else " ")
-
-        # Show full sentence
         if getattr(self, '_last_sentence', None) != self.sentence:
             self.panel5.delete('1.0', tk.END)
             self.panel5.insert(tk.END, self.sentence)
             self._last_sentence = self.sentence
-
-        # Update suggestion buttons
         self.b1.config(text=self.word1, font=("Courier", 20), wraplength=825, command=self.action1)
         self.b2.config(text=self.word2, font=("Courier", 20), wraplength=825, command=self.action2)
         self.b3.config(text=self.word3, font=("Courier", 20), wraplength=825, command=self.action3)
         self.b4.config(text=self.word4, font=("Courier", 20), wraplength=825, command=self.action4)
 
     def predict_letter(self, test_image):
-        """Predict letter from hand image using the CNN model."""
         try:
             white = test_image.reshape(1, 400, 400, 3)
             prob = np.array(self.model.predict(white, verbose=0)[0], dtype='float32')
             ch1 = np.argmax(prob, axis=0)
             prob[ch1] = 0
             ch2 = np.argmax(prob, axis=0)
-
             pl = [ch1, ch2]
-
-            # Apply all the classification rules (keeping original logic)
             ch1 = self.apply_classification_rules(ch1, pl)
-
             return self.convert_to_letter(ch1)
         except Exception as e:
             print(f"Error in predict_letter: {e}")
             return None
-
     def distance(self, x, y):
-        """Calculate Euclidean distance between two points."""
         return math.sqrt(((x[0] - y[0]) ** 2) + ((x[1] - y[1]) ** 2))
-
     def apply_classification_rules(self, ch1, pl):
-        """Apply all classification rules to determine hand gesture group."""
-        # All the original classification rules go here
-        # condition for [Aemnst]
         l = [[5, 2], [5, 3], [3, 5], [3, 6], [3, 0], [3, 2], [6, 4], [6, 1], [6, 2], [6, 6], [6, 7], [6, 0], [6, 5],
              [4, 1], [1, 0], [1, 1], [6, 3], [1, 6], [5, 6], [5, 1], [4, 5], [1, 4], [1, 5], [2, 0], [2, 6], [4, 6],
              [1, 0], [5, 7], [1, 6], [6, 1], [7, 6], [2, 5], [7, 1], [5, 4], [7, 0], [7, 5], [7, 2]]
@@ -1274,14 +1121,10 @@ class Application:
             if (self.pts[6][1] < self.pts[8][1] and self.pts[10][1] < self.pts[12][1] and self.pts[14][1] <
                     self.pts[16][1] and self.pts[18][1] < self.pts[20][1]):
                 ch1 = 0
-
-        # condition for [o][s]
         l = [[2, 2], [2, 1]]
         if pl in l:
             if (self.pts[5][0] < self.pts[4][0]):
                 ch1 = 0
-
-        # condition for [c0][aemnst]
         l = [[0, 0], [0, 6], [0, 2], [0, 5], [0, 1], [0, 7], [5, 2], [7, 6], [7, 1]]
         pl = [ch1, pl[1]]
         if pl in l:
@@ -1289,15 +1132,11 @@ class Application:
                 0] and self.pts[0][0] > self.pts[16][0] and self.pts[0][0] > self.pts[20][0]) and self.pts[5][0] > \
                     self.pts[4][0]:
                 ch1 = 2
-
-        # condition for [c0][aemnst]
         l = [[6, 0], [6, 6], [6, 2]]
         pl = [ch1, pl[1]]
         if pl in l:
             if self.distance(self.pts[8], self.pts[16]) < 52:
                 ch1 = 2
-
-        # condition for [gh][bdfikruvw]
         l = [[1, 4], [1, 5], [1, 6], [1, 3], [1, 0]]
         pl = [ch1, pl[1]]
         if pl in l:
@@ -1305,29 +1144,21 @@ class Application:
                 1] and self.pts[0][0] < self.pts[8][0] and self.pts[0][0] < self.pts[12][0] and self.pts[0][0] < \
                     self.pts[16][0] and self.pts[0][0] < self.pts[20][0]:
                 ch1 = 3
-
-        # con for [gh][l]
         l = [[4, 6], [4, 1], [4, 5], [4, 3], [4, 7]]
         pl = [ch1, pl[1]]
         if pl in l:
             if self.pts[4][0] > self.pts[0][0]:
                 ch1 = 3
-
-        # con for [gh][pqz]
         l = [[5, 3], [5, 0], [5, 7], [5, 4], [5, 2], [5, 1], [5, 5]]
         pl = [ch1, pl[1]]
         if pl in l:
             if self.pts[2][1] + 15 < self.pts[16][1]:
                 ch1 = 3
-
-        # con for [l][x]
         l = [[6, 4], [6, 1], [6, 2]]
         pl = [ch1, pl[1]]
         if pl in l:
             if self.distance(self.pts[4], self.pts[11]) > 55:
                 ch1 = 4
-
-        # con for [l][d]
         l = [[1, 4], [1, 6], [1, 1]]
         pl = [ch1, pl[1]]
         if pl in l:
@@ -1335,109 +1166,79 @@ class Application:
                     self.pts[6][1] > self.pts[8][1] and self.pts[10][1] < self.pts[12][1] and self.pts[14][1] <
                     self.pts[16][1] and self.pts[18][1] < self.pts[20][1]):
                 ch1 = 4
-
-        # con for [l][gh]
         l = [[3, 6], [3, 4]]
         pl = [ch1, pl[1]]
         if pl in l:
             if (self.pts[4][0] < self.pts[0][0]):
                 ch1 = 4
-
-        # con for [l][c0]
         l = [[2, 2], [2, 5], [2, 4]]
         pl = [ch1, pl[1]]
         if pl in l:
             if (self.pts[1][0] < self.pts[12][0]):
                 ch1 = 4
-
-        # con for [gh][z]
         l = [[3, 6], [3, 5], [3, 4]]
         pl = [ch1, pl[1]]
         if pl in l:
             if (self.pts[6][1] > self.pts[8][1] and self.pts[10][1] < self.pts[12][1] and self.pts[14][1] <
                 self.pts[16][1] and self.pts[18][1] < self.pts[20][1]) and self.pts[4][1] > self.pts[10][1]:
                 ch1 = 5
-
-        # con for [gh][pq]
         l = [[3, 2], [3, 1], [3, 6]]
         pl = [ch1, pl[1]]
         if pl in l:
             if self.pts[4][1] + 17 > self.pts[8][1] and self.pts[4][1] + 17 > self.pts[12][1] and self.pts[4][1] + 17 > \
                     self.pts[16][1] and self.pts[4][1] + 17 > self.pts[20][1]:
                 ch1 = 5
-
-        # con for [l][pqz]
         l = [[4, 4], [4, 5], [4, 2], [7, 5], [7, 6], [7, 0]]
         pl = [ch1, pl[1]]
         if pl in l:
             if self.pts[4][0] > self.pts[0][0]:
                 ch1 = 5
-
-        # con for [pqz][aemnst]
         l = [[0, 2], [0, 6], [0, 1], [0, 5], [0, 0], [0, 7], [0, 4], [0, 3], [2, 7]]
         pl = [ch1, pl[1]]
         if pl in l:
             if self.pts[0][0] < self.pts[8][0] and self.pts[0][0] < self.pts[12][0] and self.pts[0][0] < self.pts[16][
                 0] and self.pts[0][0] < self.pts[20][0]:
                 ch1 = 5
-
-        # con for [pqz][yj]
         l = [[5, 7], [5, 2], [5, 6]]
         pl = [ch1, pl[1]]
         if pl in l:
             if self.pts[3][0] < self.pts[0][0]:
                 ch1 = 7
-
-        # con for [l][yj]
         l = [[4, 6], [4, 2], [4, 4], [4, 1], [4, 5], [4, 7]]
         pl = [ch1, pl[1]]
         if pl in l:
             if self.pts[6][1] < self.pts[8][1]:
                 ch1 = 7
-
-        # con for [x][yj]
         l = [[6, 7], [0, 7], [0, 1], [0, 0], [6, 4], [6, 6], [6, 5], [6, 1]]
         pl = [ch1, pl[1]]
         if pl in l:
             if self.pts[18][1] > self.pts[20][1]:
                 ch1 = 7
-
-        # condition for [x][aemnst]
         l = [[0, 4], [0, 2], [0, 3], [0, 1], [0, 6]]
         pl = [ch1, pl[1]]
         if pl in l:
             if self.pts[5][0] > self.pts[16][0]:
                 ch1 = 6
-
-        # condition for [yj][x]
         l = [[7, 2]]
         pl = [ch1, pl[1]]
         if pl in l:
             if self.pts[18][1] < self.pts[20][1] and self.pts[8][1] < self.pts[10][1]:
                 ch1 = 6
-
-        # condition for [c0][x]
         l = [[2, 1], [2, 2], [2, 6], [2, 7], [2, 0]]
         pl = [ch1, pl[1]]
         if pl in l:
             if self.distance(self.pts[8], self.pts[16]) > 50:
                 ch1 = 6
-
-        # con for [l][x]
         l = [[4, 6], [4, 2], [4, 1], [4, 4]]
         pl = [ch1, pl[1]]
         if pl in l:
             if self.distance(self.pts[4], self.pts[11]) < 60:
                 ch1 = 6
-
-        # con for [x][d]
         l = [[1, 4], [1, 6], [1, 0], [1, 2]]
         pl = [ch1, pl[1]]
         if pl in l:
             if self.pts[5][0] - self.pts[4][0] - 15 > 0:
                 ch1 = 6
-
-        # con for [b][pqz]
         l = [[5, 0], [5, 1], [5, 4], [5, 5], [5, 6], [6, 1], [7, 6], [0, 2], [7, 1], [7, 4], [6, 6], [7, 2], [5, 0],
              [6, 3], [6, 4], [7, 5], [7, 2]]
         pl = [ch1, pl[1]]
@@ -1445,8 +1246,6 @@ class Application:
             if (self.pts[6][1] > self.pts[8][1] and self.pts[10][1] > self.pts[12][1] and self.pts[14][1] >
                     self.pts[16][1] and self.pts[18][1] > self.pts[20][1]):
                 ch1 = 1
-
-        # con for [f][pqz]
         l = [[6, 1], [6, 0], [0, 3], [6, 4], [2, 2], [0, 6], [6, 2], [7, 6], [4, 6], [4, 1], [4, 2], [0, 2], [7, 1],
              [7, 4], [6, 6], [7, 2], [7, 5], [7, 2]]
         pl = [ch1, pl[1]]
@@ -1454,15 +1253,12 @@ class Application:
             if (self.pts[6][1] < self.pts[8][1] and self.pts[10][1] > self.pts[12][1] and self.pts[14][1] >
                     self.pts[16][1] and self.pts[18][1] > self.pts[20][1]):
                 ch1 = 1
-
         l = [[6, 1], [6, 0], [4, 2], [4, 1], [4, 6], [4, 4]]
         pl = [ch1, pl[1]]
         if pl in l:
             if (self.pts[10][1] > self.pts[12][1] and self.pts[14][1] > self.pts[16][1] and self.pts[18][1] >
                     self.pts[20][1]):
                 ch1 = 1
-
-        # con for [d][pqz]
         l = [[5, 0], [3, 4], [3, 0], [3, 1], [3, 5], [5, 5], [5, 4], [5, 1], [7, 6]]
         pl = [ch1, pl[1]]
         if pl in l:
@@ -1470,7 +1266,6 @@ class Application:
                  self.pts[16][1] and self.pts[18][1] < self.pts[20][1]) and (self.pts[2][0] < self.pts[0][0]) and
                     self.pts[4][1] > self.pts[14][1]):
                 ch1 = 1
-
         l = [[4, 1], [4, 2], [4, 4]]
         pl = [ch1, pl[1]]
         if pl in l:
@@ -1478,7 +1273,6 @@ class Application:
                     self.pts[6][1] > self.pts[8][1] and self.pts[10][1] < self.pts[12][1] and self.pts[14][1] <
                     self.pts[16][1] and self.pts[18][1] < self.pts[20][1]):
                 ch1 = 1
-
         l = [[3, 4], [3, 0], [3, 1], [3, 5], [3, 6]]
         pl = [ch1, pl[1]]
         if pl in l:
@@ -1701,72 +1495,52 @@ class Application:
             self.word2 = " "
             self.word3 = " "
             self.word4 = " "
-
     def _speak_word(self, word):
-        """Speak a word in a separate thread."""
         try:
             self.speak_engine.say(word)
             self.speak_engine.runAndWait()
         except:
             pass
-
     def action1(self):
-        """Replace current word with suggestion 1."""
         if self.word1.strip():
             self.current_word = self.word1.upper()
             self.update_suggestions()
-
     def action2(self):
-        """Replace current word with suggestion 2."""
         if self.word2.strip():
             self.current_word = self.word2.upper()
             self.update_suggestions()
 
     def action3(self):
-        """Replace current word with suggestion 3."""
         if self.word3.strip():
             self.current_word = self.word3.upper()
             self.update_suggestions()
-
     def action4(self):
-        """Replace current word with suggestion 4."""
         if self.word4.strip():
             self.current_word = self.word4.upper()
             self.update_suggestions()
-
     def speak_fun(self):
-        """Speak the full sentence."""
         text_to_speak = self.sentence.strip()
         if text_to_speak:
             threading.Thread(target=self._speak_thread, args=(text_to_speak,)).start()
-
     def _speak_thread(self, text):
-        """Speak text in a separate thread."""
         try:
             self.speak_engine.say(text)
             self.speak_engine.runAndWait()
         except:
             pass
-
     def clear_fun(self):
-        """Clear all text (current word and sentence)."""
         self.current_word = ""
         self.sentence = ""
         self.word1 = " "
         self.word2 = " "
         self.word3 = " "
         self.word4 = " "
-
     def destructor(self):
-        """Clean up resources on application close."""
         print("Closing application...")
         self.root.destroy()
         self.vs.release()
         cv2.destroyAllWindows()
-
-
 print("Starting Application...")
-
 if __name__ == "__main__":
     (Application()).root.mainloop()
 
